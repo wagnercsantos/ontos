@@ -19,15 +19,6 @@
 - **workflows**: the Workflow Designer shows problems, not only errors. **Check** (next to Save) runs the validation without saving and lists its errors and warnings in a panel; a step a warning is about gets an amber ring, and clicking the entry selects it. Warnings don't block a save: `terminal_step_has_next`, `conditional_branch_missing` (a conditional with no step on a branch) and `unreachable_steps`. The stored trigger warnings (`stored_entity_type_unknown`, `stored_entity_type_unsupported`) show on the trigger node. The workflows list marks a workflow whose stored trigger has warnings. What to check: open the workflows with the badge, or Check the gates whose conditionals have no Fail step.
 - **audit**: a data product deprecated or retired through Ask Ontos or MCP (`update_data_product` with a status) is now audited as `DEPRECATE` / `RETIRE`, as the `change-status` route does; `DEPRECATE` carries the deprecation reason, sunset date and replacement. Before, the tool always wrote `CHANGE_STATUS` with only the product id and the new status, so audit log filters or alerts on `DEPRECATE` / `RETIRE` missed those changes. Other transitions are still `CHANGE_STATUS`.
 
-## ✨ Features
-
-- **ui**: branding part 2: optional tagline, dark mode logo, primary and accent theme colors (`UI_APP_TAGLINE`, `UI_CUSTOM_LOGO_DARK_URL`, `UI_THEME_*`) and a "Powered by Ontos" footer switch (`UI_SHOW_POWERED_BY`), all editable in Settings > UI Customization. Branding images also accept a root-relative app asset path. Nothing changes until a value is set.
-
-## 🐛 Bug Fixes
-
-- **ui**: a round or non-square custom logo keeps its aspect ratio in the sidebar, also when collapsed (#226)
-
-
 # Release Notes - v1.0.0 (2026-06-22)
 
 
