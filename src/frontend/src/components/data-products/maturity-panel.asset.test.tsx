@@ -34,7 +34,7 @@ const REPORT: MaturityReport = {
       gate('g-2', 'Domínio definido', false, { failure_message: 'Falta: domínio definido' }),
       gate('g-3', 'Colunas descritas', false, {
         message_code: 'maturity_uc_table_not_found',
-        message_params: { tableName: 'ifood_demo.logistica.pedidos_diarios' },
+        message_params: { tableName: 'demo_catalog.sales.orders_daily' },
         failure_message: 'Falta: colunas descritas',
       }),
     ],
@@ -96,7 +96,7 @@ describe('MaturityPanel on a table asset', () => {
 
     // A coded reason wins over the policy text
     expect(within(rows[2]).getByText(
-      'A tabela ifood_demo.logistica.pedidos_diarios não foi encontrada no Unity Catalog, '
+      'A tabela demo_catalog.sales.orders_daily não foi encontrada no Unity Catalog, '
       + 'então faltam os campos dela.',
     )).toBeInTheDocument();
   });
