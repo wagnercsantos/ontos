@@ -11,7 +11,7 @@ import json
 import os
 from collections import defaultdict
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from uuid import UUID
 
 from openpyxl import Workbook
@@ -23,6 +23,7 @@ from src.common.logging import get_logger
 from src.controller.assets_manager import AssetsManager
 from src.db_models.assets import AssetDb, AssetRelationshipDb
 from src.models.assets import (
+    CodedWarning,
     AssetCreate,
     AssetStatus,
     AssetUpdate,
@@ -107,6 +108,9 @@ class ImportResultItem(BaseModel):
     action: ImportAction
     asset_id: Optional[str] = None
     message: Optional[str] = None
+    # What the row's save could not do (it still succeeded), e.g. a description
+    # that was not written to Unity Catalog
+    warnings: List[CodedWarning] = Field(default_factory=list)
 
 
 class ImportResult(BaseModel):
@@ -114,6 +118,9 @@ class ImportResult(BaseModel):
     updated: int = 0
     skipped: int = 0
     errors: int = 0
+    warnings: int = 0
+    # What the import as a whole could not do (it still succeeded); per-row ones are on the items
+    warning_messages: List[CodedWarning] = Field(default_factory=list)
     items: List[ImportResultItem] = Field(default_factory=list)
     error_messages: List[str] = Field(default_factory=list)
 
@@ -546,9 +553,15 @@ class AssetBulkManager:
     # ------------------------------------------------------------------
 
     def execute_import(
-        self, db: Session, *, file_bytes: bytes, filename: str, current_user_id: str
+        self, db: Session, *, file_bytes: bytes, filename: str, current_user_id: str,
+        after_save: Optional[Callable[[UUID, Optional[str]], Optional[CodedWarning]]] = None,
     ) -> ImportResult:
-        """Parse, validate, and execute the import in a single transaction."""
+        """Parse, validate, and execute the import in a single transaction.
+
+        ``after_save(asset_id, previous_description)`` runs after each saved
+        row; a warning it returns is added to the row, and it never fails it.
+        A changed Column description also updates its table's column snapshot.
+        """
         result = ImportResult()
 
         rows = self._parse_file(file_bytes, filename)
@@ -644,6 +657,7 @@ class AssetBulkManager:
                         result.items.append(item)
                         continue
 
+                    previous_description = existing.description
                     update_data = AssetUpdate(
                         name=name,
                         description=description,
@@ -670,6 +684,7 @@ class AssetBulkManager:
                         platform=platform_val or "", location=location_val or "",
                     )
                     if existing:
+                        previous_description = existing.description
                         update_data = AssetUpdate(
                             description=description,
                             properties=with_internal_properties(properties, existing.properties),
@@ -686,6 +701,7 @@ class AssetBulkManager:
                         result.updated += 1
                         created_assets[name.lower()] = updated.id
                     else:
+                        previous_description = None
                         create_data = {
                             "name": name,
                             "description": description,
@@ -713,6 +729,10 @@ class AssetBulkManager:
                 result.items.append(item)
                 continue
 
+            if description != previous_description:
+                self._update_column_snapshot(db, item)
+            if after_save is not None:
+                self._after_save(after_save, item, previous_description, result)
             result.items.append(item)
 
         # Wire parent relationships (skip if cycles detected)
@@ -720,6 +740,29 @@ class AssetBulkManager:
             self._wire_parent_relationships(db, rows, type_map, created_assets, result)
 
         return result
+
+    def _update_column_snapshot(self, db: Session, item: ImportResultItem) -> None:
+        try:
+            asset = self._asset_repo.get(db, UUID(item.asset_id))
+            if asset is not None:
+                AssetsManager.update_table_column_snapshot(db, asset)
+        except Exception:
+            logger.warning("Updating the column snapshot for import row %s failed", item.row,
+                           exc_info=True)
+
+    @staticmethod
+    def _after_save(
+        after_save: Callable[[UUID, Optional[str]], Optional[CodedWarning]],
+        item: ImportResultItem, previous_description: Optional[str], result: ImportResult,
+    ) -> None:
+        try:
+            warning = after_save(UUID(item.asset_id), previous_description)
+        except Exception:
+            logger.warning("Post-save step failed for import row %s", item.row, exc_info=True)
+            return
+        if warning is not None:
+            item.warnings.append(warning)
+            result.warnings += 1
 
     def _wire_parent_relationships(
         self,

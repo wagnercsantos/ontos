@@ -5,7 +5,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, 
 
 from src.models.assets import (
     AssetTypeCreate, AssetTypeUpdate, AssetTypeRead, AssetTypeSummary,
-    AssetCreate, AssetUpdate, AssetRead, AssetSummary,
+    AssetCreate, AssetUpdate, AssetRead, AssetSummary, AssetUpdateResult,
     AssetRelationshipCreate, AssetRelationshipRead,
     PaginatedAssetSummary,
     DeletePreviewItem, CascadeDeleteRequest, CascadeDeleteResult,
@@ -16,6 +16,8 @@ from src.controller.metric_views_manager import (
 )
 from src.common.workspace_client import get_obo_workspace_client
 from src.controller.semantic_links_manager import SemanticLinksManager
+from src.controller.uc_description_sync_manager import UcDescriptionSyncManager
+from src.db_models.assets import AssetDb
 from src.models.metric_views import MetricViewRead
 from src.controller.metric_view_change_requests_manager import (
     ChangeRequestError, MetricViewChangeRequestsManager,
@@ -30,6 +32,7 @@ from src.common.dependencies import (
     CurrentUserDep,
     AuditManagerDep,
     AuditCurrentUserDep,
+    SettingsDep,
 )
 from src.common.errors import NotFoundError, ConflictError, ValidationError
 from src.common.logging import get_logger
@@ -419,6 +422,7 @@ def get_all_assets(
 def get_asset(
     asset_id: UUID,
     request: Request,
+    settings: SettingsDep,
     db: DBSessionDep,
     current_user: CurrentUserDep,
     manager=Depends(get_assets_manager),
@@ -438,18 +442,22 @@ def get_asset(
     result = manager.get_asset(db=db, asset_id=asset_id)
     if not result:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Asset '{asset_id}' not found")
+    if not UcDescriptionSyncManager(settings).enabled:
+        # Writing to Unity Catalog is off, so an older "not in sync" mark means nothing
+        result.description_sync = None
     return result
 
 
 @assets_router.put(
     "/{asset_id}",
-    response_model=AssetRead,
+    response_model=AssetUpdateResult,
     dependencies=[Depends(PermissionChecker(FEATURE_ID, FeatureAccessLevel.READ_WRITE))],
 )
 def update_asset(
     asset_id: UUID,
     request: Request,
     asset_in: AssetUpdate,
+    settings: SettingsDep,
     db: DBSessionDep,
     audit_manager: AuditManagerDep,
     current_user: AuditCurrentUserDep,
@@ -460,7 +468,27 @@ def update_asset(
     success = False
     details = {"params": {"asset_id": str(asset_id)}}
     try:
+        existing = db.get(AssetDb, asset_id)
+        previous_description = existing.description if existing is not None else None
         result = manager.update_asset(db=db, asset_id=asset_id, asset_in=asset_in, current_user_id=current_user.email)
+        # With the setting on, a changed table, view or column description is also
+        # written to Unity Catalog as the user. A failed write doesn't fail the save:
+        # the response carries a coded warning and the asset's description_sync state.
+        # The save is committed first: no row locks are held while Unity Catalog is
+        # written, and Unity Catalog never gets ahead of a save that failed to commit.
+        db.commit()
+        warning, sync_state = UcDescriptionSyncManager(settings).sync_after_update(
+            db, asset_id,
+            description_sent='description' in asset_in.model_fields_set,
+            previous_description=previous_description,
+            user_client=lambda: _user_workspace_client(request),
+        )
+        result = AssetUpdateResult(
+            **result.model_dump(), warnings=[warning] if warning else [],
+        )
+        result.description_sync = sync_state
+        if warning:
+            details["uc_description_warning"] = warning.code
         success = True
         _schedule_maturity_evaluation(background_tasks, request, asset_id, current_user.email)
         return result
